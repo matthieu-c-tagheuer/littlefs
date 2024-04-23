@@ -222,6 +222,8 @@ struct lfs_config {
     // data and reducing the number of disk accesses. Must be a multiple of the
     // read and program sizes, and a factor of the block size.
     lfs_size_t cache_size;
+    lfs_size_t read_cache_size;
+    lfs_size_t prog_cache_size;
 
     // Size of the lookahead buffer in bytes. A larger lookahead buffer
     // increases the number of blocks found during an allocation pass. The
@@ -435,6 +437,8 @@ typedef struct lfs_gstate {
 typedef struct lfs {
     lfs_cache_t rcache;
     lfs_cache_t pcache;
+    lfs_size_t read_cache_size;
+    lfs_size_t prog_cache_size;
 
     lfs_block_t root[2];
     struct lfs_mlist {

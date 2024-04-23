@@ -93,7 +93,7 @@ static inline void lfs_cache_drop(lfs_t *lfs, lfs_cache_t *rcache) {
 
 static inline void lfs_cache_zero(lfs_t *lfs, lfs_cache_t *pcache) {
     // zero to avoid information leak
-    memset(pcache->buffer, 0xff, lfs->cfg->cache_size);
+    memset(pcache->buffer, 0xff, lfs->prog_cache_size);
     pcache->block = LFS_BLOCK_NULL;
 }
 
@@ -177,7 +177,7 @@ static int lfs_bd_read_raw(lfs_t *lfs,
         if (reverse) {
                 lfs_size_t msize;
                 moff = off + size;
-                msize = lfs_min(hint, lfs->cfg->cache_size);
+                msize = lfs_min(hint, lfs->read_cache_size);
                 if (moff > msize)
                         moff = lfs_alignup(moff - msize, lfs->cfg->read_size);
                 else
@@ -189,7 +189,7 @@ static int lfs_bd_read_raw(lfs_t *lfs,
                     lfs_alignup(moff+hint, lfs->cfg->read_size),
                     lfs->cfg->block_size)
                 - rcache->off,
-                lfs->cfg->cache_size);
+                lfs->read_cache_size);
         int err = lfs->cfg->read(lfs->cfg, rcache->block,
                 rcache->off, rcache->buffer, rcache->size);
         LFS_ASSERT(err <= 0);
@@ -332,10 +332,10 @@ static int lfs_bd_prog(lfs_t *lfs,
     while (size > 0) {
         if (block == pcache->block &&
                 off >= pcache->off &&
-                off < pcache->off + lfs->cfg->cache_size) {
+                off < pcache->off + lfs->prog_cache_size) {
             // already fits in pcache?
             lfs_size_t diff = lfs_min(size,
-                    lfs->cfg->cache_size - (off-pcache->off));
+                    lfs->prog_cache_size - (off-pcache->off));
             memcpy(&pcache->buffer[off-pcache->off], data, diff);
 
             data += diff;
@@ -343,7 +343,7 @@ static int lfs_bd_prog(lfs_t *lfs,
             size -= diff;
 
             pcache->size = lfs_max(pcache->size, off - pcache->off);
-            if (pcache->size == lfs->cfg->cache_size) {
+            if (pcache->size == lfs->prog_cache_size) {
                 // eagerly flush out pcache if we fill up
                 int err = lfs_bd_flush(lfs, pcache, rcache, validate);
                 if (err) {
@@ -358,12 +358,12 @@ static int lfs_bd_prog(lfs_t *lfs,
         // entire block or manually flushing the pcache
         LFS_ASSERT(pcache->block == LFS_BLOCK_NULL);
 
-        if (size >= lfs->cfg->cache_size) {
+        if (size >= lfs->prog_cache_size) {
             // data do not fit in cache, direct write
             // XXX align on cache_size : the file flush logic between
             // block is triggered by "pcache->size == lfs->cfg->cache_size"
             // could be prog_size in theory
-            lfs_size_t diff = lfs_aligndown(size, lfs->cfg->cache_size);
+            lfs_size_t diff = lfs_aligndown(size, lfs->prog_cache_size);
             int err = lfs_bd_flush_direct(lfs, rcache, block, off,
                     data, diff, validate);
             if (err) {
@@ -939,7 +939,7 @@ static int lfs_dir_getread(lfs_t *lfs, const lfs_mdir_t *dir,
         rcache->block = LFS_BLOCK_INLINE;
         rcache->off = lfs_aligndown(off, lfs->cfg->read_size);
         rcache->size = lfs_min(lfs_alignup(off+hint, lfs->cfg->read_size),
-                lfs->cfg->cache_size);
+                lfs->read_cache_size);
         int err = lfs_dir_getslice(lfs, dir, gmask, gtag,
                 rcache->off, rcache->buffer, rcache->size);
         if (err < 0) {
@@ -1853,7 +1853,7 @@ static int lfs_dir_commitcrc(lfs_t *lfs, struct lfs_commit *commit) {
 
         // manually flush here since we don't prog the padding, this confuses
         // the caching layer
-        if (noff >= end || noff >= lfs->pcache.off + lfs->cfg->cache_size) {
+        if (noff >= end || noff >= lfs->pcache.off + lfs->prog_cache_size) {
             // flush buffers
             int err = lfs_bd_sync(lfs, &lfs->pcache, &lfs->rcache, false);
             if (err) {
@@ -4287,17 +4287,30 @@ static int lfs_init(lfs_t *lfs, const struct lfs_config *cfg) {
     // which littlefs currently does not support
     LFS_ASSERT((bool)0x80000000);
 
+    if (!lfs->cfg->read_cache_size)
+        lfs->read_cache_size = lfs->cfg->cache_size;
+    else
+        lfs->read_cache_size = lfs->cfg->read_cache_size;
+    if (!lfs->cfg->prog_cache_size)
+        lfs->prog_cache_size = lfs->cfg->cache_size;
+    else
+        lfs->prog_cache_size = lfs->cfg->prog_cache_size;
+
     // validate that the lfs-cfg sizes were initiated properly before
     // performing any arithmetic logics with them
     LFS_ASSERT(lfs->cfg->read_size != 0);
     LFS_ASSERT(lfs->cfg->prog_size != 0);
+    LFS_ASSERT(lfs->read_cache_size != 0);
+    LFS_ASSERT(lfs->prog_cache_size != 0);
     LFS_ASSERT(lfs->cfg->cache_size != 0);
 
     // check that block size is a multiple of cache size is a multiple
     // of prog and read sizes
-    LFS_ASSERT(lfs->cfg->cache_size % lfs->cfg->read_size == 0);
-    LFS_ASSERT(lfs->cfg->cache_size % lfs->cfg->prog_size == 0);
+    LFS_ASSERT(lfs->read_cache_size % lfs->cfg->read_size == 0);
+    LFS_ASSERT(lfs->prog_cache_size % lfs->cfg->prog_size == 0);
     LFS_ASSERT(lfs->cfg->block_size % lfs->cfg->cache_size == 0);
+    LFS_ASSERT(lfs->cfg->block_size % lfs->read_cache_size == 0);
+    LFS_ASSERT(lfs->cfg->block_size % lfs->prog_cache_size == 0);
 
     // check that the block size is large enough to fit all ctz pointers
     LFS_ASSERT(lfs->cfg->block_size >= 128);
@@ -4327,7 +4340,7 @@ static int lfs_init(lfs_t *lfs, const struct lfs_config *cfg) {
     if (lfs->cfg->read_buffer) {
         lfs->rcache.buffer = lfs->cfg->read_buffer;
     } else {
-        lfs->rcache.buffer = lfs_malloc(lfs->cfg->cache_size);
+        lfs->rcache.buffer = lfs_malloc(lfs->read_cache_size);
         if (!lfs->rcache.buffer) {
             err = LFS_ERR_NOMEM;
             goto cleanup;
@@ -4338,7 +4351,7 @@ static int lfs_init(lfs_t *lfs, const struct lfs_config *cfg) {
     if (lfs->cfg->prog_buffer) {
         lfs->pcache.buffer = lfs->cfg->prog_buffer;
     } else {
-        lfs->pcache.buffer = lfs_malloc(lfs->cfg->cache_size);
+        lfs->pcache.buffer = lfs_malloc(lfs->prog_cache_size);
         if (!lfs->pcache.buffer) {
             err = LFS_ERR_NOMEM;
             goto cleanup;
